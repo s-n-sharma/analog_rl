@@ -1,0 +1,8 @@
+
+* Sallen-Key Low-Pass Filter
+Vin vin 0 1
+R1 vin n1 10e3
+R2 n1 vout 10e3
+C1 n1 0 10e-9
+C2 vout n1 10e-9
+E1 vout n1 vout 0
