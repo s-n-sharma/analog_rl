@@ -3,7 +3,7 @@ import numpy as np
 from Filter import Filter
 
 class Generator:
-    def __init__(self, MAX_FILTERS = 5, omega_c_range = None, zeta_range = None):
+    def __init__(self, MAX_FILTERS = 5, omega_c_range = None, zeta_range = None, stageDecider = None):
         """Initialize the generator"""
         self.total_gen = 0
         self.MAX_FILTERS = MAX_FILTERS
@@ -21,6 +21,11 @@ class Generator:
             lower_zeta_range = np.linspace(0.1, 0.4, 25)
 
             self.zeta_range = np.concatenate((lower_zeta_range, middle_zeta_range, upper_zeta_range))
+        
+        if stageDecider:
+            self.stageDecider = stageDecider
+        else:
+            self.stageDecider = lambda total_gen: random.randint(1, min(total_gen, self.MAX_FILTERS))
     
     def getCircuit(self, stageDecider, freq):
         """Generate a random circuit's response with stageDecider deciding the number of stages."""
@@ -48,20 +53,5 @@ class Generator:
         return ret
             
 
-
-
-        
-
-        
-        self.total_gen += 1
-
-
-        omega_c = np.random.choice(self.omega_c_range, numComponents)
-        zeta = np.random.choice(self.zeta_range, numComponents)
-
-        return omega_c, zeta
-
-
-        
 
         
