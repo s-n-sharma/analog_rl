@@ -158,19 +158,46 @@ class RLAgent:
 # --- 3. Optimizer Class ---
 class Optimizer:
     def optimize(self, fn, p_initial, err, f, num_params_expected):
-        if len(p_initial) != num_params_expected: p_initial = [1000.0] * num_params_expected
+        if len(p_initial) != num_params_expected:
+            p_initial = [1000.0] * num_params_expected
+
+        # Create a "focus mask" based on the chosen filter type
+        template_response = fn(p_initial, f)
+        weighting_mask = np.abs(np.diff(template_response))
+        if np.sum(weighting_mask) > 0:
+            weighting_mask = weighting_mask / np.sum(weighting_mask)
+        weighting_mask = np.append(weighting_mask, weighting_mask[-1])
+
         log_p_initial = np.log10(p_initial)
+
         def log_objective_function(log_params):
             if np.any(log_params > 300): return 1e20
             try:
                 linear_params = 10**log_params
                 if np.any(np.isinf(linear_params)): return 1e20
-                mse = np.mean((fn(linear_params, f) - err)**2)
-                if not np.isfinite(mse): return 1e20
-                return mse
-            except (ValueError, FloatingPointError): return 1e20
+                
+                generated_response_for_error = fn(linear_params, f)
+                
+                # Calculate Weighted MSE
+                squared_errors = (generated_response_for_error - err)**2
+                weighted_squared_errors = squared_errors * weighting_mask
+                weighted_mse = np.mean(weighted_squared_errors)
+
+                if not np.isfinite(weighted_mse):
+                    return 1e20
+                
+                return weighted_mse
+                
+            except (ValueError, FloatingPointError):
+                return 1e20
+
         initial_sigma = 0.5
-        log_res, _ = cma.fmin2(log_objective_function, log_p_initial, initial_sigma, options={'verbose': -9, 'maxfevals': 2000})
+        log_res, _ = cma.fmin2(
+            log_objective_function, 
+            log_p_initial, 
+            initial_sigma, 
+            options={'verbose': -9, 'maxfevals': 2000}
+        )
         return 10**log_res
 
 # --- 4. Environment Components ---
@@ -204,7 +231,7 @@ if __name__ == '__main__':
     zeta_range = circuit_utils.DEFAULT_ZETA_RANGE
     
     # --- Agent and Optimizer Setup ---
-    agent = RLAgent(num_freq_points=len(freqs), num_actions=len(SUBCIRCUITS), lr=1e-4, gamma=0.98, entropy_coef=0.01) # Start with a slightly lower gamma
+    agent = RLAgent(num_freq_points=len(freqs), num_actions=len(SUBCIRCUITS), lr=1e-4, gamma=0.98, entropy_coef=0.01)
     optimizer = Optimizer()
     
     # --- Advanced Curriculum Learning Setup ---
@@ -213,7 +240,7 @@ if __name__ == '__main__':
     is_in_transition = False
     transition_progress = 0.0
     transition_duration = 2500
-    reward_threshold = 30
+    reward_threshold = 3.0
     level_up_stability = 2000
     performance_met_at = 0
 
@@ -246,8 +273,6 @@ if __name__ == '__main__':
         cascaded_response = np.zeros_like(freqs)
         total_episode_reward = 0
         current_error = target_response - cascaded_response
-
-        num_stages_per_episode = 2
 
         for stage in range(num_stages_per_episode):
             mse_before = np.mean(current_error**2)
@@ -289,7 +314,7 @@ if __name__ == '__main__':
                 transition_progress = 0.0
                 current_max_stages += 1
                 performance_met_at = 0
-                print(f"\n--- ✅ CURRICULUM STABILIZED at Stage {current_max_stages-1} (Max Target Stages: {current_max_stages}) ---\n")
+                print(f"\n--- ✅ CURRICULUM STABILIZED at Stage {current_max_stages} ---\n")
         
         elif current_max_stages < max_possible_stages:
             if current_moving_avg > reward_threshold:
@@ -298,7 +323,7 @@ if __name__ == '__main__':
                     is_in_transition = True
                     reward_threshold += 1.0
                     new_gamma = min(0.995, agent.gamma + 0.005)
-                    print(f"\n--- 🚀 STARTING TRANSITION to Stage {current_max_stages} | Gamma: {agent.gamma:.3f} -> {new_gamma:.3f} ---\n")
+                    print(f"\n--- 🚀 STARTING TRANSITION to Stage {current_max_stages + 1} | Gamma: {agent.gamma:.3f} -> {new_gamma:.3f} ---\n")
                     agent.gamma = new_gamma
             else:
                 performance_met_at = 0
@@ -314,13 +339,29 @@ if __name__ == '__main__':
             plt.pause(0.01)
 
         if (episode + 1) % CHECKPOINT_INTERVAL == 0:
-            path = os.path.join(SAVE_DIR, f'agent_checkpoint_m2t_ep_{episode+1}.pth')
-            torch.save({'episode': episode + 1, 'actor_state_dict': agent.actor.state_dict(), 'critic_state_dict': agent.critic.state_dict(), 'optimizer_state_dict': agent.optimizer.state_dict(), 'state_mean': agent.state_mean, 'state_std': agent.state_std, 'max_target_stages': current_max_stages}, path)
+            path = os.path.join(SAVE_DIR, f'opt5_deriv_att_{episode+1}.pth')
+            torch.save({
+                'episode': episode + 1,
+                'actor_state_dict': agent.actor.state_dict(),
+                'critic_state_dict': agent.critic.state_dict(),
+                'optimizer_state_dict': agent.optimizer.state_dict(),
+                'state_mean': agent.state_mean,
+                'state_std': agent.state_std,
+                'max_target_stages': current_max_stages
+            }, path)
             print(f"--- Model checkpoint saved at {path} ---")
 
     print("--- Training Finished ---")
     final_path = os.path.join(SAVE_DIR, 'agent_final.pth')
-    torch.save({'episode': num_episodes, 'actor_state_dict': agent.actor.state_dict(), 'critic_state_dict': agent.critic.state_dict(), 'optimizer_state_dict': agent.optimizer.state_dict(), 'state_mean': agent.state_mean, 'state_std': agent.state_std, 'max_target_stages': current_max_stages}, final_path)
+    torch.save({
+        'episode': num_episodes,
+        'actor_state_dict': agent.actor.state_dict(),
+        'critic_state_dict': agent.critic.state_dict(),
+        'optimizer_state_dict': agent.optimizer.state_dict(),
+        'state_mean': agent.state_mean,
+        'state_std': agent.state_std,
+        'max_target_stages': current_max_stages
+    }, final_path)
     print(f"--- Final model saved at {final_path} ---")
     
     plt.ioff()

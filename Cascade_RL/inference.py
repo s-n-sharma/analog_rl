@@ -1,110 +1,132 @@
-# inference.py
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
+import os
 import random
 
-# Import the network architectures (must be identical to training script)
-from main_training_script import PolicyNetwork, CriticNetwork, SUBCIRCUITS # Assuming you keep them in main_training_script
-from main_training_script import Optimizer # Need Optimizer for inference too
-import circuit_utils # For filter functions and target generation
+# Import the classes and utilities from your training script
+from trainer import PolicyNetwork, CriticNetwork, RLAgent, Optimizer, SUBCIRCUITS
+import circuit_utils
 
-# --- Configuration ---
-MODEL_PATH = 'trained_rl_agent_checkpoint.pth' # Path to your saved model
-NUM_FREQ_POINTS = 200 # Must match the training setup
-NUM_ACTIONS = len(SUBCIRCUITS) # Must match the training setup
-FREQ_RANGE = np.logspace(1, 5, NUM_FREQ_POINTS) # Frequencies to evaluate on
+def load_trained_agent(model_path, num_freq_points, num_actions):
+    """Loads the trained agent and its normalization statistics."""
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(f"Model checkpoint not found at: {model_path}")
 
-# --- Helper function to load the model ---
-def load_agent(model_path, num_freq_points, num_actions):
-    actor = PolicyNetwork(num_freq_points, num_actions)
-    critic = CriticNetwork(num_freq_points)
+    agent = RLAgent(num_freq_points=num_freq_points, num_actions=num_actions)
+    checkpoint = torch.load(model_path, map_location=torch.device('cpu'))
+    
+    agent.actor.load_state_dict(checkpoint['actor_state_dict'])
+    agent.critic.load_state_dict(checkpoint['critic_state_dict'])
+    agent.state_mean = checkpoint['state_mean']
+    agent.state_std = checkpoint['state_std']
+    
+    print(f"--- Model loaded successfully from {model_path} ---")
+    agent.actor.eval()
+    agent.critic.eval()
+    return agent
 
-    checkpoint = torch.load(model_path)
-    actor.load_state_dict(checkpoint['actor_state_dict'])
-    critic.load_state_dict(checkpoint['critic_state_dict'])
-
-    actor.eval() # Set to evaluation mode
-    critic.eval() # Set to evaluation mode
-    print(f"Model loaded successfully from {model_path}")
-    return actor, critic
-
-# --- Inference Function ---
-def run_inference(actor, critic, freqs, num_stages_for_agent=3):
-    # Generate a new random target circuit
-    target_response = circuit_utils.generate_random_circuit_response(
-        num_stages=random.randint(1, 5), # Target can have random stages
-        freq=freqs,
-        w_c_range=circuit_utils.DEFAULT_OMEGA_C_RANGE,
-        zeta_range=circuit_utils.DEFAULT_ZETA_RANGE,
-        available_filters=circuit_utils.FILTER_FUNCTIONS
-    )
-
+def run_inference(agent, target_response, freqs, num_stages=3):
+    """Runs the inference process to build a filter for the target response."""
+    optimizer = Optimizer()
     cascaded_response = np.zeros_like(freqs)
     current_error = target_response - cascaded_response
-    optimizer = Optimizer() # Instantiate optimizer for inference
-
-    print("\n--- Running Inference ---")
-    print(f"Target generated. Num stages for agent: {num_stages_for_agent}")
-
-    selected_subcircuits = []
+    chosen_circuits = []
     
-    # Agent's autoregressive loop
-    for stage in range(num_stages_for_agent):
-        state_tensor = torch.FloatTensor(current_error).unsqueeze(0)
-        
-        with torch.no_grad():
-            action_probs = actor(state_tensor)
-        
-        # We'll take the action with the highest probability for inference
-        action_index = torch.argmax(action_probs, dim=-1).item()
-        
+    print("\n--- Starting Inference ---")
+    for stage in range(num_stages):
+        state_array = np.array([current_error, target_response, cascaded_response])
+        action_index = agent.select_subcircuit(state_array, deterministic=True)
         subcircuit_info = SUBCIRCUITS[action_index]
-        selected_subcircuits.append(subcircuit_info["name"])
-
-        print(f"Stage {stage+1}: Agent selected '{subcircuit_info['name']}' (Action Index: {action_index})")
         
-        # Optimizer finds best parameters for this selected filter
+        print(f"Stage {stage + 1}: Agent chose '{subcircuit_info['name']}' topology.")
+        
         best_params = optimizer.optimize(
-            subcircuit_info["func"],
-            subcircuit_info["initial_params"],
-            current_error,
+            subcircuit_info["func"], 
+            subcircuit_info["initial_params"], 
+            current_error, 
             freqs,
             subcircuit_info["num_params"]
         )
         
-        # Apply the optimized filter
         optimized_response = subcircuit_info["func"](best_params, freqs)
         cascaded_response += optimized_response
-        
-        # Update error for the next stage
         current_error = target_response - cascaded_response
+        chosen_circuits.append({'name': subcircuit_info['name'], 'params': best_params, 'response': optimized_response})
 
-    final_mse = np.mean(current_error**2)
-    print(f"Inference complete. Final MSE: {final_mse:.4f}")
+    print("--- Inference Finished ---")
+    return cascaded_response, chosen_circuits
 
-    return target_response, cascaded_response, selected_subcircuits, final_mse
+def plot_results(target, final_response, chosen_circuits, freqs, final_loss):
+    """Plots the target, the final result, and displays the final loss."""
+    plt.figure(figsize=(12, 8))
+    
+    plt.semilogx(freqs, target, 'k--', linewidth=2.5, label='Target Response')
+    plt.semilogx(freqs, final_response, 'b-', linewidth=2.5, label='Final Cascaded Response')
+    
+    for i, circuit in enumerate(chosen_circuits):
+        plt.semilogx(freqs, circuit['response'], '--', label=f"Stage {i+1}: {circuit['name']}")
 
-# --- Main execution ---
-if __name__ == '__main__':
-    # Load the trained agent
-    actor, critic = load_agent(MODEL_PATH, NUM_FREQ_POINTS, NUM_ACTIONS)
-
-    # Run inference
-    target_resp, model_resp, selected_circuits, final_mse = run_inference(actor, critic, FREQ_RANGE)
-
-    # Plot the results
-    plt.figure(figsize=(12, 6))
-    plt.plot(FREQ_RANGE, target_resp, label='Target Response', color='blue', linewidth=2)
-    plt.plot(FREQ_RANGE, model_resp, label='Model\'s Best Attempt', color='red', linestyle='--', linewidth=2)
-    plt.xscale('log')
-    plt.title(f'Target vs. Model\'s Attempt (Final MSE: {final_mse:.4f})')
+    plt.title(f'Inference Result\nFinal MSE Loss: {final_loss:.4e}')
     plt.xlabel('Frequency (Hz)')
     plt.ylabel('Magnitude (dB)')
-    plt.legend()
     plt.grid(True, which="both", ls="-")
+    plt.legend()
+    
+    # --- FIX: Ensure the plot window stays open ---
+    plt.ioff()
     plt.show()
 
-    print("\nSelected Subcircuits by Agent:")
-    for i, circuit_name in enumerate(selected_circuits):
-        print(f"  Stage {i+1}: {circuit_name}")
+if __name__ == '__main__':
+    # --- Configuration ---
+    MODEL_PATH = 'trained_models/agent_opt3_linc_ep_10000.pth'
+    NUM_STAGES = 10
+    
+    # --- Setup ---
+    freqs = np.logspace(1, 5, 125)
+    omega_c_range = circuit_utils.DEFAULT_OMEGA_C_RANGE
+    zeta_range = circuit_utils.DEFAULT_ZETA_RANGE 
+    
+    # --- Load Agent ---
+    agent = load_trained_agent(
+        model_path=MODEL_PATH,
+        num_freq_points=len(freqs),
+        num_actions=len(SUBCIRCUITS)
+    )
+    
+    # --- Generate a Target Function and get Ground Truth ---
+    target_response, ground_truth_info = circuit_utils.generate_random_circuit_response(
+        num_stages=10, 
+        freq=freqs,
+        w_c_range=omega_c_range,
+        zeta_range=zeta_range,
+        available_filters=circuit_utils.FILTER_FUNCTIONS
+    )
+    
+    # --- NEW: Print the ground truth ---
+    print("\n--- Ground Truth Circuit ---")
+    for i, circuit in enumerate(ground_truth_info):
+        param_str = ", ".join([f"{p:.2f}" for p in circuit['params']])
+        print(f"  {i+1}. Type: {circuit['name']}, Params: [{param_str}]")
+    
+    # --- Run Inference ---
+    final_cascaded_response, chosen_circuits_info = run_inference(
+        agent=agent,
+        target_response=target_response,
+        freqs=freqs,
+        num_stages=NUM_STAGES
+    )
+    
+    # --- NEW: Calculate the final loss ---
+    final_loss = np.mean((target_response - final_cascaded_response)**2)
+    
+    # --- Display Results ---
+    print("\n--- Final Agent-Built Circuit ---")
+    for i, circuit in enumerate(chosen_circuits_info):
+        param_str = ", ".join([f"{p:.2f}" for p in circuit['params']])
+        print(f"  {i+1}. Type: {circuit['name']}, Optimized Params: [{param_str}]")
+    
+    print(f"\nFinal Mean Squared Error: {final_loss:.4e}")
+
+    # --- NEW: Pass the final loss to the plotting function ---
+    plot_results(target_response, final_cascaded_response, chosen_circuits_info, freqs, final_loss)
