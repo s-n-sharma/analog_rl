@@ -1,0 +1,4 @@
+overall plan is to create a decoder for the overall construct model
+->construct model takes in a transfer function and some circuit, and outputs a distribution in some latent vector space which is sampled and decoded by the decoder to produce an actual circuit
+->this circuit (hopefully) is just the original circuit but with a small change to make it closer to the transfer function. We then feed this circuit back into the RL agent
+->the decoder is trained on inverted pairs from an encoder model, which is trianed via contrastive learning

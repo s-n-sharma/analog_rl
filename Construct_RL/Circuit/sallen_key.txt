@@ -1,0 +1,8 @@
+
+* Sallen-Key Low-Pass Filter
+Vin in 0 1
+R1 in 1 1k
+R2 1 out 1k
+C1 1 2 1u
+C2 2 0 1u
+E1 2 out out
