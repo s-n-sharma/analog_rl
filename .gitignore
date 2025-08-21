@@ -1,6 +1,7 @@
 Cascade_RL/trained_models
-*.pth
 Construct_RL/Circuit/circuits
 Construct_RL/Circuit/responses
 Construct_RL/Circuit/closest.txt
 Construct_RL/Circuit/furthest.txt
+Construct_RL/Circuit/circuits.zip
+Construct_RL/Circuit/responses.zip
